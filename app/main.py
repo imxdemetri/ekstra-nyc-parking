@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import run_migrations, get_conn
 from app.rules import evaluate_parking, can_i_park_all_day
+from app.vision import scan_cameras, detect_vehicles
 
 
 @asynccontextmanager
@@ -145,6 +146,116 @@ def camera_detail(camera_id: str):
             return result
     finally:
         conn.close()
+
+
+@app.get("/api/v1/parking/scan")
+def scan_nearby(
+    lat: float = Query(..., description="Latitude"),
+    lng: float = Query(..., description="Longitude"),
+    radius: float = Query(300, description="Search radius in meters"),
+    limit: int = Query(10, description="Max cameras to scan"),
+):
+    """Real-time scan: detect vehicles on nearby DOT cameras + evaluate parking rules.
+
+    Combines YOLOv8n vehicle detection with regulation data for a complete picture:
+    - How many vehicles are visible on camera right now
+    - Whether parking is legally allowed at this time
+    - Traffic status (empty/light/moderate/heavy)
+    """
+    now = datetime.now()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            lat_delta = radius / 111000
+            lng_delta = radius / 85000
+            cur.execute("""
+                SELECT id, name, image_url, latitude, longitude
+                FROM dot_cameras
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                  AND camera_type = 'intersection'
+                ORDER BY ABS(latitude - %s) + ABS(longitude - %s)
+                LIMIT %s
+            """, (lat - lat_delta, lat + lat_delta, lng - lng_delta, lng + lng_delta, lat, lng, limit))
+            cameras = cur.fetchall()
+    finally:
+        conn.close()
+
+    if not cameras:
+        return {"cameras_scanned": 0, "message": "No DOT cameras found nearby.", "results": []}
+
+    cam_tuples = [(c[0], c[1], c[2], c[3], c[4]) for c in cameras]
+    detections = scan_cameras(cam_tuples)
+
+    # Enrich with parking rules
+    rules = evaluate_parking(lat, lng, now, radius)
+
+    # Merge: for each detection, find matching rule data
+    for det in detections:
+        matching_cam = next((c for c in rules.get("cameras", []) if c["id"] == det["camera_id"]), None)
+        if matching_cam:
+            det["block_faces"] = matching_cam.get("block_faces", [])
+            parkable = [f for f in det["block_faces"] if f.get("can_park")]
+            det["legal_parking_available"] = len(parkable) > 0
+            if parkable:
+                det["parking_summary"] = parkable[0]["reason"]
+            else:
+                restricted = [f for f in det["block_faces"] if not f.get("can_park")]
+                det["parking_summary"] = restricted[0]["reason"] if restricted else "No regulation data"
+        else:
+            det["block_faces"] = []
+            det["legal_parking_available"] = None
+            det["parking_summary"] = "No regulation data for this camera"
+
+    available = [d for d in detections if d.get("legal_parking_available") and d["vehicles_detected"] <= 3]
+
+    summary = ""
+    if available:
+        best = available[0]
+        summary = f"Parking likely available at {best['camera_name']}. {best['vehicles_detected']} vehicles visible. {best['parking_summary']}"
+    elif detections:
+        summary = f"Scanned {len(detections)} cameras. All locations are either congested or restricted right now."
+    else:
+        summary = "Could not scan any cameras near this location."
+
+    return {
+        "summary": summary,
+        "scanned_at": now.isoformat(),
+        "day": now.strftime("%A"),
+        "time": now.strftime("%I:%M %p"),
+        "cameras_scanned": len(detections),
+        "parking_available": len(available),
+        "results": detections,
+    }
+
+
+@app.get("/api/v1/parking/camera/{camera_id}/live")
+def camera_live_scan(camera_id: str):
+    """Scan a single camera for vehicles right now."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name, image_url, latitude, longitude FROM dot_cameras WHERE id = %s", (camera_id,))
+            cam = cur.fetchone()
+            if not cam:
+                return {"error": "Camera not found"}
+    finally:
+        conn.close()
+
+    detection = detect_vehicles(cam[2])
+    if detection is None:
+        return {"error": "Could not fetch or analyze camera image"}
+
+    now = datetime.now()
+    rules = evaluate_parking(cam[3], cam[4], now, radius_m=50)
+
+    return {
+        "camera": {"id": cam[0], "name": cam[1], "image_url": cam[2], "latitude": cam[3], "longitude": cam[4]},
+        "detection": detection,
+        "traffic_status": "empty" if detection["total"] == 0 else "light" if detection["total"] <= 2 else "moderate" if detection["total"] <= 5 else "heavy",
+        "parking_rules": rules,
+        "scanned_at": now.isoformat(),
+    }
 
 
 @app.post("/api/v1/parking/ingest")
