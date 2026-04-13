@@ -87,6 +87,7 @@ def _parse_sign_rule(desc: str) -> dict:
     upper = desc.upper()
 
     # Determine rule type
+    is_asp = False
     if "NO STANDING" in upper:
         rule_type = "no_standing"
     elif "NO STOPPING" in upper:
@@ -96,7 +97,6 @@ def _parse_sign_rule(desc: str) -> dict:
         is_asp = True
     elif "NO PARKING" in upper:
         rule_type = "no_parking"
-        is_asp = False
     elif "HMP" in upper or "METER" in upper or "PAY-BY-CELL" in upper:
         rule_type = "metered"
         is_asp = False
@@ -115,9 +115,6 @@ def _parse_sign_rule(desc: str) -> dict:
     else:
         rule_type = "other"
         is_asp = False
-
-    if rule_type == "no_parking" and "SANITATION" in upper:
-        is_asp = True
 
     # Parse times
     times = _TIME_RE.findall(desc)
