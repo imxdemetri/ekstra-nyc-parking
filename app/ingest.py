@@ -379,7 +379,18 @@ def match_cameras_to_signs():
                 cross_upper = cross_st.upper().strip() if cross_st else ""
 
                 # Find sign block faces on the main street near the cross street
+                # Extract the street number for precise matching (e.g., "45 St" -> match "45 STREET" but NOT "145 STREET")
                 if cross_upper:
+                    # Build cross street patterns that avoid substring false matches
+                    # "45 ST" should match "WEST   45 STREET" but not "WEST  145 STREET"
+                    # Use word-boundary: space or start-of-string before the number
+                    cross_num = re.search(r"(\d+)", cross_upper)
+                    if cross_num:
+                        # Match the number preceded by a space (not another digit)
+                        cross_pattern = f"% {cross_num.group(1)} %"
+                    else:
+                        cross_pattern = f"%{cross_upper}%"
+
                     cur.execute("""
                         SELECT DISTINCT on_street, from_street, to_street, side_of_street,
                             COUNT(*) as sign_count,
@@ -394,7 +405,7 @@ def match_cameras_to_signs():
                         GROUP BY on_street, from_street, to_street, side_of_street
                     """, (
                         f"%{main_upper}%", area,
-                        f"%{cross_upper}%", f"%{cross_upper}%",
+                        cross_pattern, cross_pattern,
                     ))
                 else:
                     continue
