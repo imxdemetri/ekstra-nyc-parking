@@ -42,6 +42,12 @@ app.add_middleware(
 )
 
 
+@app.get("/")
+def root():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/docs")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "nyc-parking"}
