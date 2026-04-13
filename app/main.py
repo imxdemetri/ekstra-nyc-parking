@@ -264,6 +264,38 @@ def camera_live_scan(camera_id: str):
     }
 
 
+@app.get("/api/v1/parking/camera/{camera_id}/snapshot")
+def camera_snapshot(camera_id: str):
+    """Proxy a live camera snapshot image. Solves CORS for browser embedding."""
+    from fastapi.responses import Response
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT image_url FROM dot_cameras WHERE id = %s", (camera_id,))
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return Response(content=b"", status_code=404)
+    finally:
+        conn.close()
+
+    import httpx
+    try:
+        resp = httpx.get(row[0], timeout=10)
+        if resp.status_code != 200:
+            return Response(content=b"", status_code=502)
+        return Response(
+            content=resp.content,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "no-cache, max-age=5",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+    except Exception:
+        return Response(content=b"", status_code=502)
+
+
 @app.post("/api/v1/parking/ingest")
 def trigger_ingest(
     cameras: bool = Query(True, description="Ingest DOT cameras"),
