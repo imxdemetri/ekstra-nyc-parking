@@ -150,12 +150,15 @@ def camera_detail(camera_id: str):
 @app.post("/api/v1/parking/ingest")
 def trigger_ingest():
     """Manually trigger a full data ingest."""
+    import traceback
     from app.ingest import run_full_ingest
     try:
         run_full_ingest()
         return {"status": "ok", "message": "Ingest complete"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        tb = traceback.format_exc()
+        print(f"[ingest] ERROR: {tb}")
+        return {"status": "error", "message": str(e), "traceback": tb}
 
 
 @app.get("/api/v1/parking/stats")

@@ -267,7 +267,7 @@ def ingest_signs(batch_size: int = 5000):
                         s.get("side_of_street"),
                         s.get("sign_code"),
                         s.get("sign_description", ""),
-                        int(s["distance_from_intersection"]) if s.get("distance_from_intersection") else None,
+                        int(float(s["distance_from_intersection"])) if s.get("distance_from_intersection") and s["distance_from_intersection"].strip() else None,
                         s.get("arrow_direction"),
                         float(x) if x else None,
                         float(y) if y else None,
