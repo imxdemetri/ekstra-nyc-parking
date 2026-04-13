@@ -148,13 +148,32 @@ def camera_detail(camera_id: str):
 
 
 @app.post("/api/v1/parking/ingest")
-def trigger_ingest():
-    """Manually trigger a full data ingest."""
+def trigger_ingest(
+    cameras: bool = Query(True, description="Ingest DOT cameras"),
+    signs: bool = Query(True, description="Ingest parking signs"),
+    meters: bool = Query(True, description="Ingest parking meters"),
+    match: bool = Query(True, description="Match cameras to block faces"),
+):
+    """Manually trigger data ingest. Can run individual steps."""
     import traceback
-    from app.ingest import run_full_ingest
+    from app.ingest import ingest_cameras, ingest_signs, ingest_meters, match_cameras_to_signs
+    from app.db import run_migrations
     try:
-        run_full_ingest()
-        return {"status": "ok", "message": "Ingest complete"}
+        run_migrations()
+        results = {}
+        if cameras:
+            ingest_cameras()
+            results["cameras"] = "done"
+        if signs:
+            ingest_signs()
+            results["signs"] = "done"
+        if meters:
+            ingest_meters()
+            results["meters"] = "done"
+        if match:
+            match_cameras_to_signs()
+            results["matching"] = "done"
+        return {"status": "ok", "steps": results}
     except Exception as e:
         tb = traceback.format_exc()
         print(f"[ingest] ERROR: {tb}")

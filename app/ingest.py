@@ -20,7 +20,6 @@ def _nys_to_latlon(x: float, y: float) -> tuple[float, float]:
 
 
 def _parse_camera_name(name: str) -> tuple[str, str, str]:
-    """Parse 'Amsterdam Ave @ 60 St' into (main_street, cross_street, type)."""
     if "@" in name:
         parts = name.split("@", 1)
         return parts[0].strip(), parts[1].strip(), "intersection"
@@ -38,11 +37,9 @@ _DAY_NAMES = {
 
 _TIME_RE = re.compile(r"(\d{1,2}(?::\d{2})?)\s*(AM|PM)", re.IGNORECASE)
 _HOUR_RE = re.compile(r"(\d+)\s*H(?:R|MP)", re.IGNORECASE)
-_DAY_RANGE_RE = re.compile(r"(MONDAY|TUESDAY|WEDNESDAY|THURSDAY|FRIDAY|SATURDAY|SUNDAY)[\s-]*(THROUGH|THRU|-)?\s*(MONDAY|TUESDAY|WEDNESDAY|THURSDAY|FRIDAY|SATURDAY|SUNDAY)?", re.IGNORECASE)
 
 
 def _parse_time(s: str) -> str | None:
-    """Parse '8AM' or '7:30PM' to '08:00' or '19:30'."""
     m = _TIME_RE.search(s)
     if not m:
         return None
@@ -60,7 +57,6 @@ def _parse_time(s: str) -> str | None:
 
 
 def _parse_days(desc: str) -> list[str]:
-    """Extract days from sign description."""
     upper = desc.upper()
     if "ANYTIME" in upper or "EVERYDAY" in upper:
         return ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -73,7 +69,6 @@ def _parse_days(desc: str) -> list[str]:
     if "MONDAY-SATURDAY" in upper or "MON-SAT" in upper:
         return ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
 
-    # Individual days mentioned
     found = []
     for token in re.split(r"[\s,/&]+", upper):
         token = token.strip(".-")
@@ -83,11 +78,9 @@ def _parse_days(desc: str) -> list[str]:
 
 
 def _parse_sign_rule(desc: str) -> dict:
-    """Parse a sign_description into structured parking rule."""
     upper = desc.upper()
-
-    # Determine rule type
     is_asp = False
+
     if "NO STANDING" in upper:
         rule_type = "no_standing"
     elif "NO STOPPING" in upper:
@@ -99,24 +92,17 @@ def _parse_sign_rule(desc: str) -> dict:
         rule_type = "no_parking"
     elif "HMP" in upper or "METER" in upper or "PAY-BY-CELL" in upper:
         rule_type = "metered"
-        is_asp = False
     elif "LOADING" in upper:
         rule_type = "loading"
-        is_asp = False
     elif "BUS STOP" in upper or "BUS ONLY" in upper:
         rule_type = "bus_stop"
-        is_asp = False
     elif "TAXI" in upper:
         rule_type = "taxi_stand"
-        is_asp = False
     elif "AUTHORIZED" in upper or "PERMIT" in upper or "LICENSE PLATES ONLY" in upper:
         rule_type = "special_permit"
-        is_asp = False
     else:
         rule_type = "other"
-        is_asp = False
 
-    # Parse times
     times = _TIME_RE.findall(desc)
     start_time = None
     end_time = None
@@ -126,16 +112,13 @@ def _parse_sign_rule(desc: str) -> dict:
     elif len(times) == 1:
         start_time = _parse_time(f"{times[0][0]} {times[0][1]}")
 
-    # Parse max hours
     max_hours = None
     hm = _HOUR_RE.search(desc)
     if hm:
         max_hours = float(hm.group(1))
 
-    # Parse days
     days = _parse_days(desc)
 
-    # Vehicle restriction
     vehicle_restriction = None
     if "COMMERCIAL" in upper:
         vehicle_restriction = "commercial"
@@ -158,7 +141,6 @@ def _parse_sign_rule(desc: str) -> dict:
 
 
 def _parse_meter_hours(hours_str: str) -> dict:
-    """Parse '2HR Pas Mon-Sat 0900-1900' into structured rule."""
     if not hours_str:
         return {}
     upper = hours_str.upper()
@@ -174,7 +156,6 @@ def _parse_meter_hours(hours_str: str) -> dict:
 
     days = _parse_days(upper)
 
-    # Parse 4-digit times like 0900-1900
     time_match = re.search(r"(\d{4})-(\d{4})", upper)
     start_time = None
     end_time = None
@@ -195,7 +176,7 @@ def _parse_meter_hours(hours_str: str) -> dict:
 # ── Ingest functions ─────────────────────────────────────────────────
 
 def ingest_cameras():
-    """Fetch 953 DOT cameras and upsert into dot_cameras table."""
+    """Fetch 953 DOT cameras and upsert."""
     print("[ingest] Fetching DOT cameras...")
     resp = httpx.get(DOT_CAMERAS_URL, timeout=30)
     cameras = resp.json()
@@ -204,48 +185,48 @@ def ingest_cameras():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            rows = []
             for cam in cameras:
                 main_st, cross_st, cam_type = _parse_camera_name(cam["name"])
-                cur.execute("""
-                    INSERT INTO dot_cameras (id, name, latitude, longitude, area, is_online, main_street, cross_street, camera_type, image_url, last_synced_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (id) DO UPDATE SET
-                        is_online = EXCLUDED.is_online,
-                        last_synced_at = NOW()
-                """, (
+                rows.append((
                     cam["id"], cam["name"], cam["latitude"], cam["longitude"],
                     cam.get("area"), cam.get("isOnline") == "true",
                     main_st, cross_st, cam_type, cam.get("imageUrl"),
                 ))
+            execute_values(cur, """
+                INSERT INTO dot_cameras (id, name, latitude, longitude, area, is_online, main_street, cross_street, camera_type, image_url)
+                VALUES %s
+                ON CONFLICT (id) DO UPDATE SET is_online = EXCLUDED.is_online, last_synced_at = NOW()
+            """, rows)
         conn.commit()
         print(f"[ingest] Upserted {len(cameras)} cameras")
     finally:
         conn.close()
 
 
-def ingest_signs(batch_size: int = 5000):
-    """Fetch all 440K parking signs and insert into parking_signs table."""
-    print("[ingest] Fetching parking signs...")
+def ingest_signs():
+    """Fetch all 440K parking signs using large batches."""
+    print("[ingest] Fetching parking signs (large batches)...")
     conn = get_conn()
     total = 0
-    offset = 0
+    batch_size = 50000  # Max allowed by Socrata SODA API
 
     try:
         with conn.cursor() as cur:
-            # Clear and reload
-            cur.execute("DELETE FROM parking_signs")
+            cur.execute("TRUNCATE parking_signs RESTART IDENTITY")
             conn.commit()
 
+            offset = 0
             while True:
-                url = f"{SIGNS_URL}?$limit={batch_size}&$offset={offset}&$order=order_number"
-                resp = httpx.get(url, timeout=60)
+                url = f"{SIGNS_URL}?$limit={batch_size}&$offset={offset}&$order=:id"
+                print(f"[ingest] Signs batch: offset={offset} ...")
+                resp = httpx.get(url, timeout=120)
                 signs = resp.json()
-                if not signs:
+                if not signs or not isinstance(signs, list):
                     break
 
                 rows = []
                 for s in signs:
-                    # Convert coordinates
                     lat, lng = None, None
                     x = s.get("sign_x_coord")
                     y = s.get("sign_y_coord")
@@ -255,8 +236,15 @@ def ingest_signs(batch_size: int = 5000):
                         except Exception:
                             pass
 
-                    # Parse the rule
                     rule = _parse_sign_rule(s.get("sign_description", ""))
+
+                    dist = None
+                    d_raw = s.get("distance_from_intersection", "")
+                    if d_raw and str(d_raw).strip():
+                        try:
+                            dist = int(float(d_raw))
+                        except (ValueError, TypeError):
+                            pass
 
                     rows.append((
                         s.get("order_number"),
@@ -267,7 +255,7 @@ def ingest_signs(batch_size: int = 5000):
                         s.get("side_of_street"),
                         s.get("sign_code"),
                         s.get("sign_description", ""),
-                        int(float(s["distance_from_intersection"])) if s.get("distance_from_intersection") and s["distance_from_intersection"].strip() else None,
+                        dist,
                         s.get("arrow_direction"),
                         float(x) if x else None,
                         float(y) if y else None,
@@ -290,35 +278,38 @@ def ingest_signs(batch_size: int = 5000):
                         rule_type, days, start_time, end_time, max_hours,
                         vehicle_restriction, is_asp
                     ) VALUES %s
-                """, rows)
+                """, rows, page_size=5000)
                 conn.commit()
 
                 total += len(signs)
-                print(f"[ingest] Signs: {total} ingested (offset {offset})")
+                print(f"[ingest] Signs: {total} ingested")
+                if len(signs) < batch_size:
+                    break
                 offset += batch_size
 
-        print(f"[ingest] Total signs ingested: {total}")
+        print(f"[ingest] Total signs: {total}")
     finally:
         conn.close()
 
 
-def ingest_meters(batch_size: int = 5000):
+def ingest_meters():
     """Fetch all 15K parking meters."""
     print("[ingest] Fetching parking meters...")
     conn = get_conn()
     total = 0
-    offset = 0
 
     try:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM parking_meters")
+            cur.execute("TRUNCATE parking_meters RESTART IDENTITY")
             conn.commit()
 
+            offset = 0
+            batch_size = 50000
             while True:
                 url = f"{METERS_URL}?$limit={batch_size}&$offset={offset}"
                 resp = httpx.get(url, timeout=60)
                 meters = resp.json()
-                if not meters:
+                if not meters or not isinstance(meters, list):
                     break
 
                 rows = []
@@ -352,14 +343,16 @@ def ingest_meters(batch_size: int = 5000):
                         latitude, longitude,
                         max_hours, days, start_time, end_time, vehicle_type
                     ) VALUES %s
-                """, rows)
+                """, rows, page_size=5000)
                 conn.commit()
 
                 total += len(meters)
-                print(f"[ingest] Meters: {total} ingested")
+                print(f"[ingest] Meters: {total}")
+                if len(meters) < batch_size:
+                    break
                 offset += batch_size
 
-        print(f"[ingest] Total meters ingested: {total}")
+        print(f"[ingest] Total meters: {total}")
     finally:
         conn.close()
 
@@ -371,10 +364,9 @@ def match_cameras_to_signs():
 
     try:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM camera_block_faces")
+            cur.execute("TRUNCATE camera_block_faces RESTART IDENTITY")
             conn.commit()
 
-            # Get all intersection cameras
             cur.execute("SELECT id, name, main_street, cross_street, area FROM dot_cameras WHERE camera_type = 'intersection'")
             cameras = cur.fetchall()
 
@@ -383,52 +375,57 @@ def match_cameras_to_signs():
                 if not main_st or not area:
                     continue
 
-                # Normalize street names for matching
                 main_upper = main_st.upper().strip()
+                cross_upper = cross_st.upper().strip() if cross_st else ""
 
-                # Find signs on the main street in this borough, near the cross street
-                cur.execute("""
-                    SELECT DISTINCT on_street, from_street, to_street, side_of_street,
-                        COUNT(*) as sign_count,
-                        BOOL_OR(rule_type = 'metered') as has_metered,
-                        BOOL_OR(rule_type = 'free' OR (rule_type = 'other' AND sign_description NOT LIKE '%%NO %%')) as has_free,
-                        BOOL_OR(rule_type = 'no_parking') as has_no_parking,
-                        BOOL_OR(rule_type = 'no_standing') as has_no_standing
-                    FROM parking_signs
-                    WHERE upper(on_street) LIKE %s
-                        AND borough = %s
-                        AND (upper(from_street) LIKE %s OR upper(to_street) LIKE %s)
-                    GROUP BY on_street, from_street, to_street, side_of_street
-                """, (
-                    f"%{main_upper}%", area,
-                    f"%{cross_st.upper().strip()}%" if cross_st else "%",
-                    f"%{cross_st.upper().strip()}%" if cross_st else "%",
-                ))
+                # Find sign block faces on the main street near the cross street
+                if cross_upper:
+                    cur.execute("""
+                        SELECT DISTINCT on_street, from_street, to_street, side_of_street,
+                            COUNT(*) as sign_count,
+                            BOOL_OR(rule_type = 'metered') as has_metered,
+                            BOOL_OR(rule_type NOT IN ('no_standing','no_parking','bus_stop','taxi_stand','loading','special_permit')) as has_free,
+                            BOOL_OR(rule_type = 'no_parking') as has_no_parking,
+                            BOOL_OR(rule_type = 'no_standing') as has_no_standing
+                        FROM parking_signs
+                        WHERE upper(on_street) LIKE %s
+                            AND borough = %s
+                            AND (upper(from_street) LIKE %s OR upper(to_street) LIKE %s)
+                        GROUP BY on_street, from_street, to_street, side_of_street
+                    """, (
+                        f"%{main_upper}%", area,
+                        f"%{cross_upper}%", f"%{cross_upper}%",
+                    ))
+                else:
+                    continue
 
                 faces = cur.fetchall()
+                rows = []
                 for on_st, from_st, to_st, side, sign_count, has_metered, has_free, has_no_parking, has_no_standing in faces:
                     # Count nearby meters
                     cur.execute("""
                         SELECT COUNT(*) FROM parking_meters
-                        WHERE upper(on_street) LIKE %s
-                            AND borough = %s
+                        WHERE upper(on_street) LIKE %s AND borough = %s
                             AND (upper(from_street) LIKE %s OR upper(to_street) LIKE %s)
                     """, (f"%{main_upper}%", area, f"%{from_st.upper()}%", f"%{to_st.upper()}%"))
                     meter_count = cur.fetchone()[0]
 
-                    cur.execute("""
-                        INSERT INTO camera_block_faces (
-                            camera_id, on_street, from_street, to_street, side_of_street, borough,
-                            sign_count, meter_count, has_metered_parking, has_free_parking,
-                            has_no_parking, has_no_standing
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT DO NOTHING
-                    """, (
+                    rows.append((
                         cam_id, on_st, from_st, to_st, side, area,
                         sign_count, meter_count, has_metered or False, has_free or False,
                         has_no_parking or False, has_no_standing or False,
                     ))
                     matched += 1
+
+                if rows:
+                    execute_values(cur, """
+                        INSERT INTO camera_block_faces (
+                            camera_id, on_street, from_street, to_street, side_of_street, borough,
+                            sign_count, meter_count, has_metered_parking, has_free_parking,
+                            has_no_parking, has_no_standing
+                        ) VALUES %s
+                        ON CONFLICT DO NOTHING
+                    """, rows)
 
             conn.commit()
             print(f"[ingest] Matched {matched} block faces to cameras")

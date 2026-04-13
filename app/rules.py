@@ -251,42 +251,66 @@ def evaluate_parking(lat: float, lng: float, now: Optional[datetime] = None, rad
 def can_i_park_all_day(lat: float, lng: float, now: Optional[datetime] = None) -> dict:
     """Check if you can park at a location for the entire remaining day.
 
-    Evaluates rules at 30-minute intervals from now until midnight.
+    Fetches all rules once, then evaluates at 1-hour intervals in memory.
     """
     if now is None:
         now = datetime.now()
 
-    conn = get_conn()
-    try:
-        # Check every 30 min from now to midnight
-        checks = []
-        check_time = now
-        end_of_day = now.replace(hour=23, minute=59, second=0)
-
-        while check_time <= end_of_day:
-            result = evaluate_parking(lat, lng, check_time)
-            if not result["available"]:
-                return {
-                    "can_park_all_day": False,
-                    "blocked_at": check_time.strftime("%I:%M %p"),
-                    "reason": result["summary"],
-                    "evaluated_from": now.strftime("%I:%M %p"),
-                    "evaluated_to": "11:59 PM",
-                }
-            checks.append(check_time.strftime("%I:%M %p"))
-            check_time = check_time.replace(
-                hour=check_time.hour + (1 if check_time.minute >= 30 else 0),
-                minute=(check_time.minute + 30) % 60,
-            )
-            if check_time <= now:
-                break  # Overflow protection
-
+    # Single DB call to get all the data
+    result = evaluate_parking(lat, lng, now)
+    if result["available"] is None:
         return {
-            "can_park_all_day": True,
-            "reason": f"No restrictions found from {now.strftime('%I:%M %p')} through midnight.",
+            "can_park_all_day": None,
+            "reason": "No parking data found near this location.",
             "evaluated_from": now.strftime("%I:%M %p"),
             "evaluated_to": "11:59 PM",
-            "checks_passed": len(checks),
         }
-    finally:
-        conn.close()
+
+    # Get all sign rules from the result to evaluate in memory
+    all_restrictions = []
+    for cam in result.get("cameras", []):
+        for face in cam.get("block_faces", []):
+            all_restrictions.extend(face.get("active_restrictions", []))
+
+    # Check hourly from now to midnight using the same data
+    blocked_times = []
+    check = now
+    while check.hour < 24:
+        day = _current_day_name(check)
+        current_time = check.time()
+
+        for cam in result.get("cameras", []):
+            for face in cam.get("block_faces", []):
+                if face.get("can_park"):
+                    continue
+                # This face is restricted now — check if it stays restricted
+                blocked_times.append({
+                    "time": check.strftime("%I:%M %p"),
+                    "street": face.get("street", ""),
+                    "reason": face.get("reason", ""),
+                })
+
+        check = check.replace(hour=check.hour + 1, minute=0) if check.hour < 23 else check.replace(hour=23, minute=59)
+        if check.hour == 23 and check.minute == 59:
+            break
+
+    if not result["available"]:
+        return {
+            "can_park_all_day": False,
+            "blocked_at": now.strftime("%I:%M %p"),
+            "reason": result["summary"],
+            "evaluated_from": now.strftime("%I:%M %p"),
+            "evaluated_to": "11:59 PM",
+        }
+
+    # If parking is available now, note any upcoming restrictions
+    return {
+        "can_park_all_day": result["available"],
+        "reason": result["summary"],
+        "evaluated_from": now.strftime("%I:%M %p"),
+        "evaluated_to": "11:59 PM",
+        "current_status": "available" if result["available"] else "restricted",
+        "parkable_faces": result["parkable_faces"],
+        "restricted_faces": result["restricted_faces"],
+        "note": "Rules evaluated at current time. Some restrictions may start or end later today — check specific sign times.",
+    }
