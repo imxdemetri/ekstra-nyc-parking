@@ -12,22 +12,17 @@ from app.rules import evaluate_parking, can_i_park_all_day
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    run_migrations()
-    # Check if data exists, run ingest if empty
+    # Run migrations only — ingest is triggered via POST /api/v1/parking/ingest
     try:
+        run_migrations()
         conn = get_conn()
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM dot_cameras")
             cam_count = cur.fetchone()[0]
         conn.close()
-        if cam_count == 0:
-            print("[startup] No camera data — running initial ingest...")
-            from app.ingest import run_full_ingest
-            run_full_ingest()
-        else:
-            print(f"[startup] {cam_count} cameras already ingested")
+        print(f"[startup] DB ready. {cam_count} cameras in database. POST /api/v1/parking/ingest to load data.")
     except Exception as e:
-        print(f"[startup] DB check failed: {e} — ingest will run on first /ingest call")
+        print(f"[startup] DB connection issue: {e}")
     yield
 
 
